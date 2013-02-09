@@ -151,6 +151,8 @@
 (defun javadoc-add-roots (&rest directories)
   "Index and load all documentation under DIRECTORIES."
   (loop for directory in directories
+        ;; Directory names have to be without trailing slash.
+        ;; Add the trailing slash to directory names
         for truename = (jdl/dir-truename directory)
         unless (jdl/loaded-p truename)
         do (jdl/add truename)))
@@ -191,6 +193,27 @@ always be there."
   (interactive (list (jdl/completing-read)))
   (let ((file (apply #'concat (reverse (gethash name jdl/index)))))
     (when file (browse-url file))))
+
+(defun javadoc-load-javadoc (dir)
+  "Load another javadoc."
+  (interactive "DRoot dir of javadoc: ")
+  (javadoc-add-roots (directory-file-name
+                      (expand-file-name dir))))
+
+(defun javadoc-unload-javadoc (dir)
+  "Unload one of the currently loaded javadocs."
+  (interactive (list (completing-read
+                      "Javadoc to unload: "
+                      jdl/loaded
+                      nil
+                      t)))
+  (let ((loaded-lst jdl/loaded))
+    (jdl/clear)
+    ;; jdl/loaded holds directory names which must end with the
+    ;; trailing slash.
+    (apply #'javadoc-add-roots
+           (delete (concat (directory-file-name dir) "/")
+                   loaded-lst))))
 
 (provide 'javadoc-lookup)
 
