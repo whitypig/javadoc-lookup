@@ -187,6 +187,95 @@ always be there."
   (funcall javadoc-lookup-completing-read-function "Class: "
            (jdl/get-class-list)))
 
+(defun jdl/parse-entry (entry)
+  (let* ((method (jdl/extract-method-name entry))
+         (class (and method
+                     (jdl/extract-class-name entry)))
+         (url (and method
+                   (jdl/extract-url entry))))
+    (and method
+         (list method class url))))
+
+(defun jdl/replce-mark-in-string (string)
+  (replace-regexp-in-string
+   "&lt;" "<"
+   (replace-regexp-in-string
+    "&gt;" ">" string)))
+
+(defun jdl/extract-method-name (entry)
+  "Extract method or constructor name."
+  (let ((name (jdl/extract-string-by-regexp entry "<b>" "</b>")))
+    (when (and name (string-match "(" name))
+      (jdl/replce-mark-in-string name))))
+
+(defun jdl/extract-string-by-regexp (string beg-regexp end-regexp)
+  "Return substring of string between BEG-REGEXP and END-REGEXP."
+  (let* ((beg (and (string-match beg-regexp string)
+                   (match-end 0)))
+         (end (and beg (string-match end-regexp string beg))))
+    (and beg
+         end
+         (substring-no-properties string beg end))))
+
+(defun jdl/extract-class-name (entry)
+  (let ((class-name
+         (jdl/extract-string-by-regexp entry
+                                       "\\(in\\|for\\) class "
+                                       "</a>")))
+    (when class-name
+      (jdl/replce-mark-in-string
+       (jdl/remove-anchor-tag-in-classname class-name)))))
+
+(defun jdl/remove-anchor-tag-in-classname (classname)
+  ;; class-name should not contain '</a>'.
+  (replace-regexp-in-string
+   "<a.*>" "" classname))
+
+(defun jdl/extract-url (entry)
+  (let ((url (jdl/extract-string-by-regexp entry
+                                           "<a href=\"\\./"
+                                           "\"")))
+    (when url
+      (jdl/replce-mark-in-string url))))
+
+(defun jdl/create-entry-key-value-pair (lst)
+  "Create cons cell whose car is used as key and cdr as value.
+LST is (name classname url)."
+  (cons (car lst)
+        (cons (nth 1 lst)
+              (nth 2 lst))))
+
+(defun* jdl/parse-index-all-html (file &optional (scheme "file://"))
+  "Return a hash table containing all methods and constructors
+listed in FILE. A key is a method name, and a value is a list of
+cons cells which is (class . url)."
+  ;; FILE should be index.html
+  (let* ((filepath (expand-file-name file))
+         (root-dir (file-name-directory filepath))
+         (beg-pos nil)
+         (end-pos nil)
+         (ret nil)
+         (item nil)
+         (table (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (insert-file-contents-literally filepath)
+      (goto-char (point-min))
+      (re-search-forward "<DT>" nil t 1)
+      (setq beg-pos (match-beginning 0))
+      (while (re-search-forward "<DT>" nil t)
+        (setq end-pos (1- (match-beginning 0)))
+        (setq item (jdl/parse-entry (buffer-substring-no-properties beg-pos
+                                                                    end-pos)))
+        (when item
+          (let* ((method (nth 0 item))
+                 (class (nth 1 item))
+                 (url (nth 2 item)))
+            (push (cons class (concat scheme root-dir url))
+                  (gethash method
+                           table))))
+        (setq beg-pos (1+ end-pos))))
+    table))
+
 ;;;###autoload
 (defun javadoc-lookup (name)
   "Lookup based on class name."
