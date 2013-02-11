@@ -261,13 +261,6 @@ always be there."
     (when url
       (jdl/replce-mark-in-string url))))
 
-(defun jdl/create-entry-key-value-pair (lst)
-  "Create cons cell whose car is used as key and cdr as value.
-LST is (name classname url)."
-  (cons (car lst)
-        (cons (nth 1 lst)
-              (nth 2 lst))))
-
 (defun* jdl/parse-index-all-html (file &optional (scheme "file://"))
   "Return a hash table containing all methods and constructors
 listed in FILE. A key is a method name, and a value is a list of
@@ -297,20 +290,23 @@ cons cells which is (class . url)."
                       (buffer-substring-no-properties beg-pos
                                                       end-pos)))
           (when item
-            (let* ((method (nth 0 item))
-                   (class (nth 1 item))
-                   (url (nth 2 item)))
-              (when (and method class url
-                         (not (string= method "nil"))
-                         (not (string= class "nil"))
-                         (not (string= url "nil")))
-                (push (cons class (concat scheme root-dir url))
-                      (gethash method
-                               table)))))
+            (jdl/insert-method-into-table item scheme root-dir table))
           (setq beg-pos (1+ end-pos))
           (progress-reporter-update reporter (point)))
         (progress-reporter-done reporter))
       table)))
+
+(defun jdl/insert-method-into-table (item scheme root-dir table)
+  (let* ((method (nth 0 item))
+         (class (nth 1 item))
+         (url (nth 2 item)))
+    (when (and method class url
+               (not (string= method "nil"))
+               (not (string= class "nil"))
+               (not (string= url "nil")))
+      (push (cons class (concat scheme root-dir url))
+            (gethash method
+                     table)))))
 
 (defun jdl/collect-methods (table-lst)
   (loop for table in table-lst
@@ -349,7 +345,7 @@ cons cells which is (class . url)."
            (delete (concat (directory-file-name dir) "/")
                    loaded-lst))))
 
-(defun javadoc-method-lookup (method)
+(defun javadoc-method-lookup (method &optional class)
   "Lookup based on a method name."
   (interactive (list (funcall javadoc-lookup-completing-read-function
                               "Method: "
@@ -357,22 +353,29 @@ cons cells which is (class . url)."
                               nil
                               t
                               (thing-at-point 'symbol))))
-  ;; TODO
-  ;; Should we not prompt if the number of classes is just one?
-  (let* ((class
-          (funcall javadoc-lookup-completing-read-function
-                   (concat method " in ")
-                   (jdl/collect-classes method jdl/method-table-lst)
-                   nil
-                   t))
+  (let* ((class (jdl/read-class-from-minibuffer method jdl/method-table-lst))
          (url (jdl/get-url-by-method method class jdl/method-table-lst)))
-    (if (> (length url) 1)
-        (message "javadoc-method-lookup, length of url is %s, url=%s"
-                 (length url)
-                 url)
-      (browse-url (car url)))))
+    (cond
+     ((null url)
+      (message "javadoc-method-lookup, url is null"))
+     ((> (length url) 1)
+      (message "javadoc-method-lookup, length of url is %s, url=%s"
+               (length url)
+               url))
+     (t
+      (browse-url (car url))))))
+
+(defun jdl/read-class-from-minibuffer (method table-lst)
+  "Read class name from minibuffer."
+  ;; Should we not prompt if the number of classes is just one?
+  (funcall javadoc-lookup-completing-read-function
+           (concat method " in ")
+           (jdl/collect-classes method table-lst)
+           nil
+           t))
 
 (defun jdl/get-url-by-method (method class table-lst)
+  "Return a list of urls."
   (loop for table in table-lst
         for cell = (assoc class (gethash method table))
         when cell
