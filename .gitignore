@@ -1,1 +1,4 @@
 *.elc
+test.*.el
+test
+
