@@ -61,6 +61,9 @@
 (defcustom javadoc-lookup-completing-read-function #'ido-completing-read
   "Function used when performing a minibuffer read.")
 
+(defcustom javadoc-lookup-use-method-lookup nil
+  "Non nil to use lookup by method.")
+
 ;; Internal variables
 
 (defvar jdl/data-root (file-name-directory load-file-name)
@@ -75,6 +78,11 @@
 (defvar jdl/loaded ()
   "List of already-loaded documentation directories.")
 
+(defvar jdl/method-table-lst nil
+  "List of hash tables.
+Each hash table is as follows:
+method => '((class1 . url1) (class2 . url2))")
+
 ;; Indexing Functions
 
 (defun jdl/dir-truename (dir)
@@ -84,7 +92,8 @@
 (defun jdl/clear ()
   "Clear all in-memory javadoc-lookup cache and indexes."
   (setq jdl/loaded nil)
-  (setq jdl/index (make-hash-table :test 'equal)))
+  (setq jdl/index (make-hash-table :test 'equal))
+  (setq jdl/method-table-lst nil))
 
 (defun jdl/loaded-p (dir)
   "Return t if DIR has already been loaded."
@@ -154,8 +163,20 @@
         ;; Directory names have to be without trailing slash.
         ;; Add the trailing slash to directory names
         for truename = (jdl/dir-truename directory)
+        for table = nil
         unless (jdl/loaded-p truename)
-        do (jdl/add truename)))
+        do (progn (jdl/add truename)
+                  (when javadoc-lookup-use-method-lookup
+                    (setq table (jdl/build-method-table truename))
+                    (and table
+                         (push table jdl/method-table-lst))))))
+
+(defun jdl/build-method-table (docroot-dir)
+  "Return a hash table containing methods indices."
+  (jdl/parse-index-all-html (concat
+                             (directory-file-name
+                              (expand-file-name docroot-dir))
+                             "/index-all.html")))
 
 (defun jdl/web (&rest urls)
   "Load pre-cached web indexes for URLS."
@@ -193,14 +214,16 @@ always be there."
                      (jdl/extract-class-name entry)))
          (url (and method
                    (jdl/extract-url entry))))
-    (and method
+    (and method class url
+         (not (string= method "nil"))
+         (not (string= class "nil"))
+         (not (string= url "nil"))
          (list method class url))))
 
 (defun jdl/replce-mark-in-string (string)
   (replace-regexp-in-string
-   "&lt;" "<"
-   (replace-regexp-in-string
-    "&gt;" ">" string)))
+   "&lt;" "<" (replace-regexp-in-string
+               "&gt;" ">" string)))
 
 (defun jdl/extract-method-name (entry)
   "Extract method or constructor name."
@@ -256,25 +279,47 @@ cons cells which is (class . url)."
          (end-pos nil)
          (ret nil)
          (item nil)
-         (table (make-hash-table :test #'equal)))
-    (with-temp-buffer
-      (insert-file-contents-literally filepath)
-      (goto-char (point-min))
-      (re-search-forward "<DT>" nil t 1)
-      (setq beg-pos (match-beginning 0))
-      (while (re-search-forward "<DT>" nil t)
-        (setq end-pos (1- (match-beginning 0)))
-        (setq item (jdl/parse-entry (buffer-substring-no-properties beg-pos
-                                                                    end-pos)))
-        (when item
-          (let* ((method (nth 0 item))
-                 (class (nth 1 item))
-                 (url (nth 2 item)))
-            (push (cons class (concat scheme root-dir url))
-                  (gethash method
-                           table))))
-        (setq beg-pos (1+ end-pos))))
-    table))
+         (table (make-hash-table :test #'equal))
+         (reporter nil))
+    (when (file-exists-p filepath)
+      (with-temp-buffer
+        (insert-file-contents-literally filepath)
+        (goto-char (point-min))
+        (setq reporter (make-progress-reporter
+                        "Parsing..." (point-min) (point-max)))
+        (re-search-forward "<DT>" nil t 1)
+        (setq beg-pos (match-beginning 0))
+        ;; BUG
+        ;; the last entry cannot be parsed.
+        (while (re-search-forward "<DT>" nil t)
+          (setq end-pos (1- (match-beginning 0)))
+          (setq item (jdl/parse-entry
+                      (buffer-substring-no-properties beg-pos
+                                                      end-pos)))
+          (when item
+            (let* ((method (nth 0 item))
+                   (class (nth 1 item))
+                   (url (nth 2 item)))
+              (when (and method class url
+                         (not (string= method "nil"))
+                         (not (string= class "nil"))
+                         (not (string= url "nil")))
+                (push (cons class (concat scheme root-dir url))
+                      (gethash method
+                               table)))))
+          (setq beg-pos (1+ end-pos))
+          (progress-reporter-update reporter (point)))
+        (progress-reporter-done reporter))
+      table)))
+
+(defun jdl/collect-methods (table-lst)
+  (loop for table in table-lst
+        append (loop for method being the hash-keys of table
+                     collect method)))
+
+(defun jdl/collect-classes (method table-lst)
+  (loop for table in table-lst
+        append (mapcar #'car (gethash method table))))
 
 ;;;###autoload
 (defun javadoc-lookup (name)
@@ -303,6 +348,35 @@ cons cells which is (class . url)."
     (apply #'javadoc-add-roots
            (delete (concat (directory-file-name dir) "/")
                    loaded-lst))))
+
+(defun javadoc-method-lookup (method)
+  "Lookup based on a method name."
+  (interactive (list (funcall javadoc-lookup-completing-read-function
+                              "Method: "
+                              (jdl/collect-methods jdl/method-table-lst)
+                              nil
+                              t
+                              (thing-at-point 'symbol))))
+  ;; TODO
+  ;; Should we not prompt if the number of classes is just one?
+  (let* ((class
+          (funcall javadoc-lookup-completing-read-function
+                   (concat method " in ")
+                   (jdl/collect-classes method jdl/method-table-lst)
+                   nil
+                   t))
+         (url (jdl/get-url-by-method method class jdl/method-table-lst)))
+    (if (> (length url) 1)
+        (message "javadoc-method-lookup, length of url is %s, url=%s"
+                 (length url)
+                 url)
+      (browse-url (car url)))))
+
+(defun jdl/get-url-by-method (method class table-lst)
+  (loop for table in table-lst
+        for cell = (assoc class (gethash method table))
+        when cell
+        collect (cdr cell)))
 
 (provide 'javadoc-lookup)
 
