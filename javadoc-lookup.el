@@ -282,8 +282,6 @@ cons cells which is (class . url)."
                         "Parsing..." (point-min) (point-max)))
         (re-search-forward "<DT>" nil t 1)
         (setq beg-pos (match-beginning 0))
-        ;; BUG
-        ;; the last entry cannot be parsed.
         (while (re-search-forward "<DT>" nil t)
           (setq end-pos (1- (match-beginning 0)))
           (setq item (jdl/parse-entry
@@ -293,6 +291,9 @@ cons cells which is (class . url)."
             (jdl/insert-method-into-table item scheme root-dir table))
           (setq beg-pos (1+ end-pos))
           (progress-reporter-update reporter (point)))
+        (setq item (jdl/parse-entry
+                    (buffer-substring-no-properties beg-pos (point))))
+        (when item (jdl/insert-method-into-table item scheme root-dir table))
         (progress-reporter-done reporter))
       table)))
 
