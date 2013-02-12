@@ -167,16 +167,57 @@ method => '((class1 . url1) (class2 . url2))")
         unless (jdl/loaded-p truename)
         do (progn (jdl/add truename)
                   (when javadoc-lookup-use-method-lookup
-                    (setq table (jdl/build-method-table truename))
-                    (and table
-                         (push table jdl/method-table-lst))))))
+                    (jdl/add-method truename)))))
+
+(defun jdl/add-method (dirname)
+  "Add hash table created from DIRNAME to `jdl/method-table-lst'.
+Also write the hash table to cache file if need be."
+  (let ((cache-filename (jdl/get-method-cache-filename dirname)))
+    (unless (jdl/load-method-cache cache-filename)
+      (let ((table (jdl/build-method-table dirname)))
+        (jdl/add-method-hash-table table)
+        (jdl/save-cache cache-filename table)))))
+
+(defun jdl/add-method-hash-table (table)
+  (push table jdl/method-table-lst))
+
+(defun jdl/load-method-cache (cache-filename)
+  "Return t if hash table is loaded successfully, nil otherwise."
+  (if (file-exists-p cache-filename)
+      (with-current-buffer (find-file-noselect cache-filename)
+        (goto-char (point-min))
+        (jdl/add-method-hash-table (read (current-buffer)))
+        (kill-buffer))
+    nil))
+
+(defun jdl/get-method-cache-filename (dirname)
+  "Return string which represents method cache file name for
+javadoc in DIRNAME."
+  (expand-file-name
+   (concat (replace-regexp-in-string "[/:]" "+" dirname)
+           ".method"
+           jdl/cache-version)
+   javadoc-lookup-cache-dir))
 
 (defun jdl/build-method-table (docroot-dir)
   "Return a hash table containing methods indices."
-  (jdl/parse-index-all-html (concat
-                             (directory-file-name
-                              (expand-file-name docroot-dir))
-                             "/index-all.html")))
+  (let* ((root (directory-file-name
+                (expand-file-name docroot-dir)))
+         (pathname (concat root "/index-all.html"))
+         (index-dir (concat root "/index-files")))
+    (cond
+     ((file-exists-p pathname)
+      (jdl/parse-index-all-html pathname))
+     ((file-directory-p index-dir)
+      ;; for now, this case is only for jdk api indices.
+      (loop for f in (directory-files index-dir t "index.*\\.html")
+            with table = (make-hash-table :test #'equal)
+            do (jdl/parse-index-all-html f
+                                         :method-func #'jdl/extract-jdk-method-name
+                                         :class-func #'jdl/extract-jdk-class-name
+                                         :url-func #'jdl/extract-jdk-url
+                                         :table table)
+            finally (return table))))))
 
 (defun jdl/web (&rest urls)
   "Load pre-cached web indexes for URLS."
@@ -208,12 +249,12 @@ always be there."
   (funcall javadoc-lookup-completing-read-function "Class: "
            (jdl/get-class-list)))
 
-(defun jdl/parse-entry (entry)
-  (let* ((method (jdl/extract-method-name entry))
+(defun jdl/parse-entry (entry method-func class-func url-func)
+  (let* ((method (funcall method-func entry))
          (class (and method
-                     (jdl/extract-class-name entry)))
+                     (funcall class-func entry)))
          (url (and method
-                   (jdl/extract-url entry))))
+                   (funcall url-func entry))))
     (and method class url
          (not (string= method "nil"))
          (not (string= class "nil"))
@@ -232,7 +273,8 @@ always be there."
       (jdl/replce-mark-in-string name))))
 
 (defun jdl/extract-string-by-regexp (string beg-regexp end-regexp)
-  "Return substring of string between BEG-REGEXP and END-REGEXP."
+  "Return substring of string between BEG-REGEXP and END-REGEXP.
+Matching is done as first match."
   (let* ((beg (and (string-match beg-regexp string)
                    (match-end 0)))
          (end (and beg (string-match end-regexp string beg))))
@@ -256,12 +298,34 @@ always be there."
 
 (defun jdl/extract-url (entry)
   (let ((url (jdl/extract-string-by-regexp entry
-                                           "<a href=\"\\./"
+                                           "<a href=\""
                                            "\"")))
     (when url
       (jdl/replce-mark-in-string url))))
 
-(defun* jdl/parse-index-all-html (file &optional (scheme "file://"))
+(defun jdl/extract-jdk-method-name (entry)
+  (let ((name (jdl/extract-string-by-regexp entry
+                                            "<a[^>]+>"
+                                            "</a>")))
+    (when (and name (string-match "(" name))
+      (jdl/replce-mark-in-string name))))
+
+(defun jdl/extract-jdk-class-name (entry)
+  (jdl/extract-class-name entry))
+
+(defun jdl/extract-jdk-url (entry)
+  (let ((url (jdl/extract-string-by-regexp entry
+                                           "<a href=\""
+                                           "\"")))
+    (when url
+      (jdl/replce-mark-in-string url))))
+
+(defun* jdl/parse-index-all-html (file &key
+                                       (scheme "file://")
+                                       (method-func #'jdl/extract-method-name)
+                                       (class-func #'jdl/extract-class-name)
+                                       (url-func #'jdl/extract-url)
+                                       (table nil))
   "Return a hash table containing all methods and constructors
 listed in FILE. A key is a method name, and a value is a list of
 cons cells which is (class . url)."
@@ -272,7 +336,7 @@ cons cells which is (class . url)."
          (end-pos nil)
          (ret nil)
          (item nil)
-         (table (make-hash-table :test #'equal))
+         (table (or table (make-hash-table :test #'equal)))
          (reporter nil))
     (when (file-exists-p filepath)
       (with-temp-buffer
@@ -286,13 +350,19 @@ cons cells which is (class . url)."
           (setq end-pos (1- (match-beginning 0)))
           (setq item (jdl/parse-entry
                       (buffer-substring-no-properties beg-pos
-                                                      end-pos)))
+                                                      end-pos)
+                      method-func
+                      class-func
+                      url-func))
           (when item
             (jdl/insert-method-into-table item scheme root-dir table))
           (setq beg-pos (1+ end-pos))
           (progress-reporter-update reporter (point)))
         (setq item (jdl/parse-entry
-                    (buffer-substring-no-properties beg-pos (point))))
+                    (buffer-substring-no-properties beg-pos (point))
+                    method-func
+                    class-func
+                    url-func))
         (when item (jdl/insert-method-into-table item scheme root-dir table))
         (progress-reporter-done reporter))
       table)))
@@ -305,7 +375,9 @@ cons cells which is (class . url)."
                (not (string= method "nil"))
                (not (string= class "nil"))
                (not (string= url "nil")))
-      (push (cons class (concat scheme root-dir url))
+      (push (cons class (concat scheme
+                                (expand-file-name
+                                 (concat root-dir url))))
             (gethash method
                      table)))))
 
