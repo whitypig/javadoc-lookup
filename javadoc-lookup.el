@@ -247,7 +247,10 @@ always be there."
     (ignore-errors ; Provide *something* useful, if needed
       (jdl/web "http://docs.oracle.com/javase/7/docs/api/")))
   (funcall javadoc-lookup-completing-read-function "Class: "
-           (jdl/get-class-list)))
+           (jdl/get-class-list)
+           nil
+           t
+           (format "%s" (symbol-at-point))))
 
 (defun jdl/parse-entry (entry method-func class-func url-func)
   (let* ((method (funcall method-func entry))
